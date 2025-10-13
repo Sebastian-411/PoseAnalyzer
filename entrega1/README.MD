@@ -130,6 +130,14 @@ Ejecutar en la primera iteración (sobre 150 clips):
 6. **Ruido**: tasa de outliers (>3σ) en tobillos durante *turn*; justificación del filtro.
 7. **Baseline** rápido: Regresión logística con Macro-F1 esperado **≥ 0.60** (sanity check).
 
+## **Estrategia de obtención de datos**
+
+Con el fin de de tener un plan dado el caso de que los resultados sean insuficientes, se optará por:
+
+1. Consultar por bases de datos que tengan o solucionen un problema similar.
+2. Recurrir a proyectos anteriores realizados por estudiantes de la universidad Icesi
+3. Creación de muestras por medio de la grabación de múltiples individuos colaboradores que se presten su imagen con fines de educación
+
 # **Siguientes pasos**
 
 1. **Cierre de captura** (150 clips) y **QA** (checklist de visibilidad, nombre, metadatos).
