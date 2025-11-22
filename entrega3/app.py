@@ -9,10 +9,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from scipy.signal import savgol_filter
 from threading import Thread
+import time
 import math
 
 # Configuración de MediaPipe
 mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 NUM_LANDMARKS = len(list(mp_pose.PoseLandmark))
 
 class PoseAnalyzerApp:
@@ -28,11 +31,25 @@ class PoseAnalyzerApp:
         self.coord_scaler = None
         self.processing = False
         
+        # Variables para webcam
+        self.webcam_active = False
+        self.cap = None
+        self.frame_buffer = []  # Buffer para acumular frames
+        self.buffer_size = 30  # Tamaño del buffer (ventana)
+        self.process_interval = 10  # Procesar cada N frames
+        self.frame_count = 0
+        self.webcam_thread = None
+        self.pose_detector = None
+        self.current_prediction = None  # Para mostrar predicción en el video
+        
         # Crear interfaz primero
         self.create_ui()
         
         # Cargar modelos después de crear la UI
         self.load_models()
+        
+        # Configurar cierre limpio
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
     def load_models(self):
         """Cargar todos los modelos y preprocesadores"""
@@ -57,7 +74,7 @@ class PoseAnalyzerApp:
                 self.coord_scaler = pickle.load(f)
             
             # Obtener el orden de columnas esperado desde los modelos
-            # Intentar obtener desde XGBoost primero (es el más estricto con el orden)
+            # Después de la agrupación, las columnas tienen sufijos como _mean, _std, etc.
             self.expected_feature_order = None
             
             # XGBoost con feature_names_in_
@@ -77,31 +94,18 @@ class PoseAnalyzerApp:
                 if hasattr(self.models['RandomForest'], 'feature_names_in_'):
                     self.expected_feature_order = list(self.models['RandomForest'].feature_names_in_)
             
-            # Si aún no se tiene, usar el orden del error (hardcoded como último recurso)
+            # Si aún no se tiene, intentar desde SVM
             if self.expected_feature_order is None:
-                # Orden exacto según el error de XGBoost
-                self.expected_feature_order = [
-                    'x_0', 'x_1', 'x_10', 'x_11', 'x_12', 'x_13', 'x_14', 'x_15', 'x_16', 'x_17', 'x_18', 'x_19', 
-                    'x_2', 'x_20', 'x_21', 'x_22', 'x_23', 'x_24', 'x_25', 'x_26', 'x_27', 'x_28', 'x_29', 
-                    'x_3', 'x_30', 'x_31', 'x_32', 'x_4', 'x_5', 'x_6', 'x_7', 'x_8', 'x_9',
-                    'y_0', 'y_1', 'y_10', 'y_11', 'y_12', 'y_13', 'y_14', 'y_15', 'y_16', 'y_17', 'y_18', 'y_19', 
-                    'y_2', 'y_20', 'y_21', 'y_22', 'y_23', 'y_24', 'y_25', 'y_26', 'y_27', 'y_28', 'y_29', 
-                    'y_3', 'y_30', 'y_31', 'y_32', 'y_4', 'y_5', 'y_6', 'y_7', 'y_8', 'y_9',
-                    'z_0', 'z_1', 'z_10', 'z_11', 'z_12', 'z_13', 'z_14', 'z_15', 'z_16', 'z_17', 'z_18', 'z_19', 
-                    'z_2', 'z_20', 'z_21', 'z_22', 'z_23', 'z_24', 'z_25', 'z_26', 'z_27', 'z_28', 'z_29', 
-                    'z_3', 'z_30', 'z_31', 'z_32', 'z_4', 'z_5', 'z_6', 'z_7', 'z_8', 'z_9',
-                    'frame_id',
-                    'vel_x_0', 'vel_x_1', 'vel_x_10', 'vel_x_11', 'vel_x_12', 'vel_x_13', 'vel_x_14', 'vel_x_15', 'vel_x_16', 'vel_x_17', 'vel_x_18', 'vel_x_19', 
-                    'vel_x_2', 'vel_x_20', 'vel_x_21', 'vel_x_22', 'vel_x_23', 'vel_x_24', 'vel_x_25', 'vel_x_26', 'vel_x_27', 'vel_x_28', 'vel_x_29', 
-                    'vel_x_3', 'vel_x_30', 'vel_x_31', 'vel_x_32', 'vel_x_4', 'vel_x_5', 'vel_x_6', 'vel_x_7', 'vel_x_8', 'vel_x_9',
-                    'vel_y_0', 'vel_y_1', 'vel_y_10', 'vel_y_11', 'vel_y_12', 'vel_y_13', 'vel_y_14', 'vel_y_15', 'vel_y_16', 'vel_y_17', 'vel_y_18', 'vel_y_19', 
-                    'vel_y_2', 'vel_y_20', 'vel_y_21', 'vel_y_22', 'vel_y_23', 'vel_y_24', 'vel_y_25', 'vel_y_26', 'vel_y_27', 'vel_y_28', 'vel_y_29', 
-                    'vel_y_3', 'vel_y_30', 'vel_y_31', 'vel_y_32', 'vel_y_4', 'vel_y_5', 'vel_y_6', 'vel_y_7', 'vel_y_8', 'vel_y_9',
-                    'vel_z_0', 'vel_z_1', 'vel_z_10', 'vel_z_11', 'vel_z_12', 'vel_z_13', 'vel_z_14', 'vel_z_15', 'vel_z_16', 'vel_z_17', 'vel_z_18', 'vel_z_19', 
-                    'vel_z_2', 'vel_z_20', 'vel_z_21', 'vel_z_22', 'vel_z_23', 'vel_z_24', 'vel_z_25', 'vel_z_26', 'vel_z_27', 'vel_z_28', 'vel_z_29', 
-                    'vel_z_3', 'vel_z_30', 'vel_z_31', 'vel_z_32', 'vel_z_4', 'vel_z_5', 'vel_z_6', 'vel_z_7', 'vel_z_8', 'vel_z_9',
-                    'angle_brazo_derecho', 'inclinacion_tronco'
-                ]
+                if hasattr(self.models['SVM'], 'named_steps'):
+                    # SVM puede estar en un Pipeline
+                    svm_step = self.models['SVM'].named_steps.get('svc', None)
+                    if svm_step and hasattr(svm_step, 'feature_names_in_'):
+                        self.expected_feature_order = list(svm_step.feature_names_in_)
+            
+            # Si aún no se tiene, el orden se determinará dinámicamente
+            # basándose en las columnas generadas por la agrupación
+            if self.expected_feature_order is None:
+                self.expected_feature_order = None  # Se determinará dinámicamente
             
             self.status_label.config(text="Modelos cargados correctamente", fg="green")
             
@@ -129,21 +133,25 @@ class PoseAnalyzerApp:
         process_btn.grid(row=1, column=1, pady=10, padx=5, sticky=(tk.W, tk.E))
         self.process_btn = process_btn
         
+        # Botón para webcam
+        self.webcam_btn = ttk.Button(main_frame, text="Iniciar Webcam", command=self.toggle_webcam)
+        self.webcam_btn.grid(row=2, column=0, columnspan=2, pady=5, padx=5, sticky=(tk.W, tk.E))
+        
         # Label para mostrar video seleccionado
         self.video_label = ttk.Label(main_frame, text="Ningún video seleccionado", foreground="gray")
-        self.video_label.grid(row=2, column=0, columnspan=2, pady=5)
+        self.video_label.grid(row=3, column=0, columnspan=2, pady=5)
         
         # Barra de progreso
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
-        self.progress.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        self.progress.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         
         # Status label (usar tk.Label para soportar fg)
         self.status_label = tk.Label(main_frame, text="Listo", fg="blue")
-        self.status_label.grid(row=4, column=0, columnspan=2, pady=5)
+        self.status_label.grid(row=5, column=0, columnspan=2, pady=5)
         
         # Frame para resultados
         results_frame = ttk.LabelFrame(main_frame, text="Resultados de los Modelos", padding="10")
-        results_frame.grid(row=5, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E, tk.N, tk.S))
+        results_frame.grid(row=6, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Área de texto para resultados
         self.results_text = tk.Text(results_frame, height=15, width=80, wrap=tk.WORD)
@@ -159,7 +167,7 @@ class PoseAnalyzerApp:
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(5, weight=1)
+        main_frame.rowconfigure(6, weight=1)
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
     
@@ -225,8 +233,9 @@ class PoseAnalyzerApp:
             self.root.after(0, lambda: self.status_label.config(text="Procesamiento completado", fg="green"))
     
     def extract_landmarks(self):
-        """Extraer landmarks del video usando MediaPipe (igual que MediaPipe.py)"""
+        """Extraer landmarks del video usando MediaPipe y mostrar visualización"""
         landmarks_list = []
+        window_name = "Pose Analyzer - Video"
         
         with mp_pose.Pose(
             static_image_mode=False,
@@ -240,7 +249,16 @@ class PoseAnalyzerApp:
             if not cap.isOpened():
                 raise Exception("No se pudo abrir el video")
             
+            # Obtener FPS del video
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 30  # Default si no se puede obtener
+            
+            frame_delay = int(1000 / fps)  # Delay en milisegundos
+            
             frame_count = 0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -249,12 +267,19 @@ class PoseAnalyzerApp:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = pose.process(frame_rgb)
                 
+                # Dibujar landmarks en el frame
                 if results.pose_landmarks:
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        results.pose_landmarks,
+                        mp_pose.POSE_CONNECTIONS,
+                        landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style()
+                    )
+                    
                     frame_number = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
                     frame_data = {}
                     
                     # Extraer landmarks exactamente como en MediaPipe.py
-                    # explicitly iterate NUM_LANDMARKS to keep column schema stable
                     for i in range(NUM_LANDMARKS):
                         lm = results.pose_landmarks.landmark[i]
                         frame_data[f'x_{i}'] = lm.x
@@ -264,35 +289,119 @@ class PoseAnalyzerApp:
                     
                     landmarks_list.append(frame_data)
                 
+                # Mostrar información en el frame
+                progress_text = f"Frame: {frame_count}/{total_frames}"
+                cv2.putText(frame, progress_text, (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                
+                # Mostrar el frame
+                cv2.imshow(window_name, frame)
+                
+                # Salir si se presiona 'q' o ESC
+                key = cv2.waitKey(frame_delay) & 0xFF
+                if key == ord('q') or key == 27:  # 'q' o ESC
+                    break
+                
+                # Verificar si la ventana fue cerrada
+                if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+                
                 frame_count += 1
                 
                 # Actualizar progreso cada 10 frames
                 if frame_count % 10 == 0:
-                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
                     self.root.after(0, lambda p=progress: self.status_label.config(
                         text=f"Extrayendo landmarks... {p:.1f}%", fg="blue"))
             
             cap.release()
+            cv2.destroyWindow(window_name)
         
         return landmarks_list
     
+    def create_overlapping_windows(self, df, window_size=30, hop_size=10):
+        """
+        Crea ventanas deslizantes con redundancia (overlapping).
+        Cada ventana contiene múltiples frames agregados estadísticamente.
+        Adaptado para un solo video sin label.
+        """
+        grouped_windows = []
+        
+        # Ordenar por índice (que representa el orden temporal)
+        df = df.sort_index().reset_index(drop=True)
+        num_frames = len(df)
+        
+        # Si no hay suficientes frames para una ventana, devolver el dataframe original
+        if num_frames < window_size:
+            # Si hay muy pocos frames, crear una sola ventana con todos los frames
+            window = df.copy()
+            window_record = {}
+            
+            numeric_cols = window.select_dtypes(include=[np.number]).columns
+            numeric_cols = [col for col in numeric_cols if col != 'frame_id']
+            
+            for col in numeric_cols:
+                values = window[col].values
+                window_record[f'{col}_mean'] = np.mean(values)
+                window_record[f'{col}_std'] = np.std(values) if len(values) > 1 else 0
+                window_record[f'{col}_min'] = np.min(values)
+                window_record[f'{col}_max'] = np.max(values)
+                window_record[f'{col}_median'] = np.median(values)
+                window_record[f'{col}_p25'] = np.percentile(values, 25)
+                window_record[f'{col}_p75'] = np.percentile(values, 75)
+            
+            grouped_windows.append(window_record)
+        else:
+            # Crear ventanas deslizantes
+            for start in range(0, num_frames - window_size + 1, hop_size):
+                end = start + window_size
+                window = df.iloc[start:end].copy()
+                
+                # Crear registro agregado para esta ventana
+                window_record = {}
+                
+                # Obtener todas las columnas numéricas (excepto frame_id)
+                numeric_cols = window.select_dtypes(include=[np.number]).columns
+                numeric_cols = [col for col in numeric_cols if col != 'frame_id']
+                
+                # Calcular estadísticas para cada feature
+                for col in numeric_cols:
+                    values = window[col].values
+                    window_record[f'{col}_mean'] = np.mean(values)
+                    window_record[f'{col}_std'] = np.std(values) if len(values) > 1 else 0
+                    window_record[f'{col}_min'] = np.min(values)
+                    window_record[f'{col}_max'] = np.max(values)
+                    window_record[f'{col}_median'] = np.median(values)
+                    window_record[f'{col}_p25'] = np.percentile(values, 25)
+                    window_record[f'{col}_p75'] = np.percentile(values, 75)
+                
+                grouped_windows.append(window_record)
+        
+        return pd.DataFrame(grouped_windows)
+    
     def preprocess_data(self, landmarks_data):
-        """Aplicar el mismo preprocesamiento que en el notebook"""
+        """Aplicar el mismo preprocesamiento que en el notebook con agrupación de ventanas"""
         if not landmarks_data:
             return None
         
         df = pd.DataFrame(landmarks_data)
         
+        # Remover columnas de visibility
         columns_to_remove = [col for col in df.columns if 'visibility' in col]
         df = df.drop(columns=columns_to_remove)
         
+        # Normalizar coordenadas primero (antes de calcular features derivadas)
         coord_cols = [f'{axis}_{i}' for i in range(NUM_LANDMARKS) for axis in ['x', 'y', 'z']]
         available_coords = [col for col in coord_cols if col in df.columns]
         
-        if available_coords:
-            df[available_coords] = self.coord_scaler.transform(df[available_coords])
+        if available_coords and self.coord_scaler is not None:
+            try:
+                df[available_coords] = self.coord_scaler.transform(df[available_coords])
+            except Exception as e:
+                # Si el scaler espera más columnas, intentar solo con las disponibles
+                print(f"Advertencia al normalizar: {e}")
         
+        # Filtrado suave (Savitzky-Golay)
         if len(df) >= 5:
             window_size = 5
             poly_order = 2
@@ -312,12 +421,14 @@ class PoseAnalyzerApp:
                     except:
                         pass
         
+        # Calcular velocidades
         for i in range(NUM_LANDMARKS):
             for axis in ['x', 'y', 'z']:
                 col = f'{axis}_{i}'
                 if col in df.columns:
                     df[f'vel_{axis}_{i}'] = df[col].diff().fillna(0)
         
+        # Calcular ángulo del brazo derecho
         angles = []
         for idx in range(len(df)):
             try:
@@ -338,40 +449,38 @@ class PoseAnalyzerApp:
         
         df['angle_brazo_derecho'] = angles
         
+        # Calcular inclinación del tronco
         try:
-                df['inclinacion_tronco'] = np.degrees(np.arctan2(
+            df['inclinacion_tronco'] = np.degrees(np.arctan2(
                 (df['y_24'] + df['y_23']) / 2 - (df['y_12'] + df['y_11']) / 2,
                 (df['z_24'] + df['z_23']) / 2 - (df['z_12'] + df['z_11']) / 2
             ))
         except:
             df['inclinacion_tronco'] = 0
         
+        # Agregar frame_id
         df['frame_id'] = range(len(df))
         
+        # AGRUPAR EN VENTANAS DESLIZANTES (igual que en el notebook)
+        WINDOW_SIZE = 30  # 30 frames = 1 segundo a 30 FPS
+        HOP_SIZE = 10     # Paso de 10 frames (redundancia: 20 frames solapados)
+        
+        df = self.create_overlapping_windows(df, window_size=WINDOW_SIZE, hop_size=HOP_SIZE)
+        
+        # Asegurar que las columnas estén en el orden esperado por los modelos
         if hasattr(self, 'expected_feature_order') and self.expected_feature_order:
             expected_cols = self.expected_feature_order
+            # Agregar columnas faltantes con valor 0
             for col in expected_cols:
                 if col not in df.columns:
                     df[col] = 0
             
+            # Filtrar solo las columnas esperadas
             return df[expected_cols]
         else:
+            # Si no hay orden esperado, devolver todas las columnas numéricas
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            
-            coord_cols = sorted([c for c in numeric_cols if any(c.startswith(f'{axis}_') for axis in ['x', 'y', 'z']) and not c.startswith('vel_') and c != 'frame_id'])
-            frame_id_col = ['frame_id'] if 'frame_id' in df.columns else []
-            vel_cols = sorted([c for c in numeric_cols if c.startswith('vel_')])
-            derived_cols = []
-            if 'angle_brazo_derecho' in df.columns:
-                derived_cols.append('angle_brazo_derecho')
-            if 'inclinacion_tronco' in df.columns:
-                derived_cols.append('inclinacion_tronco')
-            
-            ordered_cols = coord_cols + frame_id_col + vel_cols + derived_cols
-            
-            available_cols = [col for col in ordered_cols if col in df.columns]
-            
-            return df[available_cols]
+            return df[numeric_cols]
     
     def predict_all_models(self, processed_data):
         """Hacer predicciones con todos los modelos"""
@@ -379,26 +488,38 @@ class PoseAnalyzerApp:
         
         for model_name, model in self.models.items():
             try:
-                if model_name == 'SVM' and hasattr(model, 'named_steps'):
-                    pass
+                # Obtener el orden de columnas esperado
+                expected_cols = None
                 
+                # Intentar obtener desde el modelo
                 if hasattr(model, 'feature_names_in_'):
                     expected_cols = list(model.feature_names_in_)
-                    missing_cols = [col for col in expected_cols if col not in processed_data.columns]
-                    for col in missing_cols:
-                        processed_data[col] = 0
-                    processed_data = processed_data[expected_cols]
                 elif model_name == 'XGBoost' and hasattr(model, 'get_booster'):
                     try:
                         expected_cols = model.get_booster().feature_names
-                        if expected_cols:
-                            missing_cols = [col for col in expected_cols if col not in processed_data.columns]
-                            for col in missing_cols:
-                                processed_data[col] = 0
-                            processed_data = processed_data[expected_cols]
                     except:
                         pass
+                elif model_name == 'SVM' and hasattr(model, 'named_steps'):
+                    # SVM puede estar en un Pipeline
+                    svm_step = model.named_steps.get('svc', None)
+                    if svm_step and hasattr(svm_step, 'feature_names_in_'):
+                        expected_cols = list(svm_step.feature_names_in_)
                 
+                # Si no se pudo obtener, usar el orden esperado global
+                if expected_cols is None and hasattr(self, 'expected_feature_order') and self.expected_feature_order:
+                    expected_cols = self.expected_feature_order
+                
+                # Preparar los datos con las columnas esperadas
+                if expected_cols:
+                    # Agregar columnas faltantes con valor 0
+                    missing_cols = [col for col in expected_cols if col not in processed_data.columns]
+                    for col in missing_cols:
+                        processed_data[col] = 0
+                    
+                    # Reordenar columnas al orden esperado
+                    processed_data = processed_data[expected_cols]
+                
+                # Hacer predicciones
                 frame_predictions = model.predict(processed_data)
                 
                 labels = self.label_encoder.inverse_transform(frame_predictions)
@@ -414,7 +535,9 @@ class PoseAnalyzerApp:
                     'most_common': max(freq_dict.items(), key=lambda x: x[1]) if freq_dict else None
                 }
             except Exception as e:
-                predictions[model_name] = {'error': str(e)}
+                import traceback
+                error_msg = f"{str(e)}\n{traceback.format_exc()}"
+                predictions[model_name] = {'error': error_msg}
         
         return predictions
     
@@ -427,7 +550,16 @@ class PoseAnalyzerApp:
         self.results_text.insert(tk.END, "RESULTADOS DEL ANÁLISIS DE POSES\n")
         self.results_text.insert(tk.END, "=" * 70 + "\n\n")
         
-        self.results_text.insert(tk.END, f"Total de frames procesados: {len(landmarks_data)}\n\n")
+        # Calcular número de ventanas procesadas (no frames individuales)
+        total_windows = 0
+        for model_name, pred_data in predictions.items():
+            if 'total_frames' in pred_data:
+                total_windows = pred_data['total_frames']
+                break
+        
+        self.results_text.insert(tk.END, f"Total de frames extraídos: {len(landmarks_data)}\n")
+        self.results_text.insert(tk.END, f"Total de ventanas procesadas: {total_windows}\n")
+        self.results_text.insert(tk.END, f"(Ventanas de 30 frames con paso de 10 frames)\n\n")
         
         # Resultados por modelo
         for model_name, pred_data in predictions.items():
@@ -475,6 +607,302 @@ class PoseAnalyzerApp:
         """Mostrar mensaje de error"""
         messagebox.showerror("Error", message)
         self.status_label.config(text="Error", fg="red")
+    
+    def toggle_webcam(self):
+        """Iniciar o detener la webcam"""
+        if not self.webcam_active:
+            self.start_webcam()
+        else:
+            self.stop_webcam()
+    
+    def start_webcam(self):
+        """Iniciar captura de webcam"""
+        try:
+            # Intentar abrir la webcam
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                messagebox.showerror("Error", "No se pudo abrir la webcam")
+                return
+            
+            # Configurar resolución (opcional)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            
+            # Inicializar detector de poses
+            self.pose_detector = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                enable_segmentation=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            
+            # Inicializar variables
+            self.webcam_active = True
+            self.frame_buffer = []
+            self.frame_count = 0
+            
+            # Actualizar UI
+            self.webcam_btn.config(text="Detener Webcam")
+            self.process_btn.config(state="disabled")
+            self.status_label.config(text="Webcam activa - Analizando en tiempo real...", fg="green")
+            self.results_text.delete(1.0, tk.END)
+            self.results_text.insert(tk.END, "=" * 70 + "\n")
+            self.results_text.insert(tk.END, "ANÁLISIS EN TIEMPO REAL - WEBCAM\n")
+            self.results_text.insert(tk.END, "=" * 70 + "\n\n")
+            self.results_text.insert(tk.END, "📹 Webcam activada\n")
+            self.results_text.insert(tk.END, "⏳ Acumulando frames para análisis...\n")
+            self.results_text.insert(tk.END, f"📊 Se necesitan {self.buffer_size} frames para el primer análisis.\n")
+            self.results_text.insert(tk.END, f"🔄 El análisis se actualizará cada {self.process_interval} frames.\n\n")
+            self.results_text.insert(tk.END, "💡 Instrucciones:\n")
+            self.results_text.insert(tk.END, "   - Asegúrate de estar frente a la cámara\n")
+            self.results_text.insert(tk.END, "   - Realiza las actividades: caminar, girar, sentarse, pararse\n")
+            self.results_text.insert(tk.END, "   - Los resultados aparecerán automáticamente\n\n")
+            
+            # Iniciar hilo de captura
+            self.webcam_thread = Thread(target=self.webcam_capture_loop)
+            self.webcam_thread.daemon = True
+            self.webcam_thread.start()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al iniciar webcam:\n{str(e)}")
+            self.webcam_active = False
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+    
+    def stop_webcam(self):
+        """Detener captura de webcam"""
+        self.webcam_active = False
+        
+        # Cerrar todas las ventanas de OpenCV
+        cv2.destroyAllWindows()
+        
+        # Liberar recursos
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        
+        if self.pose_detector:
+            self.pose_detector.close()
+            self.pose_detector = None
+        
+        # Actualizar UI
+        self.webcam_btn.config(text="Iniciar Webcam")
+        self.process_btn.config(state="normal" if self.video_path else "disabled")
+        self.status_label.config(text="Webcam detenida", fg="blue")
+        self.frame_buffer = []
+        self.frame_count = 0
+        self.current_prediction = None
+    
+    def webcam_capture_loop(self):
+        """Loop principal para capturar y procesar frames de la webcam"""
+        window_name = "Pose Analyzer - Webcam"
+        
+        while self.webcam_active and self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            
+            # Voltear frame horizontalmente para efecto espejo
+            frame = cv2.flip(frame, 1)
+            
+            # Convertir a RGB para MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Detectar pose
+            if self.pose_detector:
+                results = self.pose_detector.process(frame_rgb)
+                
+                # Dibujar landmarks en el frame
+                if results.pose_landmarks:
+                    # Dibujar conexiones y landmarks
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        results.pose_landmarks,
+                        mp_pose.POSE_CONNECTIONS,
+                        landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style()
+                    )
+                    
+                    # Extraer landmarks del frame
+                    frame_data = {}
+                    for i in range(NUM_LANDMARKS):
+                        lm = results.pose_landmarks.landmark[i]
+                        frame_data[f'x_{i}'] = lm.x
+                        frame_data[f'y_{i}'] = lm.y
+                        frame_data[f'z_{i}'] = lm.z
+                        frame_data[f'visibility_{i}'] = lm.visibility
+                    
+                    # Agregar al buffer
+                    self.frame_buffer.append(frame_data)
+                    self.frame_count += 1
+                    
+                    # Mantener solo los últimos buffer_size frames
+                    if len(self.frame_buffer) > self.buffer_size:
+                        self.frame_buffer.pop(0)
+                    
+                    # Procesar cada process_interval frames o cuando tengamos suficientes frames
+                    if len(self.frame_buffer) >= self.buffer_size and self.frame_count % self.process_interval == 0:
+                        self.process_realtime_buffer()
+                
+                # Mostrar predicción actual en el frame
+                if self.current_prediction:
+                    # Obtener la predicción más común
+                    pred_text = "Analizando..."
+                    for model_name in ['XGBoost', 'RandomForest', 'SVM']:
+                        if model_name in self.current_prediction:
+                            pred_data = self.current_prediction[model_name]
+                            if 'most_common' in pred_data and pred_data['most_common']:
+                                activity, count = pred_data['most_common']
+                                percentage = (count / pred_data['total_frames']) * 100
+                                pred_text = f"{activity} ({percentage:.0f}%)"
+                                break
+                    
+                    # Dibujar texto en el frame
+                    cv2.putText(frame, pred_text, (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+                
+                # Mostrar información del buffer
+                buffer_text = f"Buffer: {len(self.frame_buffer)}/{self.buffer_size}"
+                cv2.putText(frame, buffer_text, (10, frame.shape[0] - 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            
+            # Mostrar el frame en una ventana
+            cv2.imshow(window_name, frame)
+            
+            # Salir si se presiona 'q' o se cierra la ventana
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self.root.after(0, self.stop_webcam)
+                break
+            
+            # Verificar si la ventana fue cerrada
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                self.root.after(0, self.stop_webcam)
+                break
+            
+            # Pequeña pausa para no saturar el CPU
+            time.sleep(0.033)  # ~30 FPS
+        
+        # Cerrar ventana al salir
+        cv2.destroyWindow(window_name)
+        
+        # Limpiar al salir
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+    
+    def process_realtime_buffer(self):
+        """Procesar el buffer de frames y hacer predicciones"""
+        if len(self.frame_buffer) < self.buffer_size:
+            return
+        
+        try:
+            # Usar solo los últimos buffer_size frames (última ventana completa)
+            buffer_to_process = self.frame_buffer[-self.buffer_size:].copy()
+            
+            # Preprocesar datos del buffer
+            processed_data = self.preprocess_data(buffer_to_process)
+            
+            if processed_data is None or len(processed_data) == 0:
+                return
+            
+            # Para tiempo real, usar solo la última ventana (última fila)
+            if len(processed_data) > 1:
+                processed_data = processed_data.iloc[[-1]]  # Última ventana
+            
+            # Hacer predicciones con todos los modelos
+            predictions = self.predict_all_models(processed_data)
+            
+            # Guardar predicción actual para mostrar en el video
+            self.current_prediction = predictions
+            
+            # Actualizar UI con resultados
+            self.root.after(0, lambda: self.update_realtime_results(predictions))
+            
+        except Exception as e:
+            # Mostrar error en la UI
+            import traceback
+            error_msg = f"Error al procesar: {str(e)}"
+            self.root.after(0, lambda: self.results_text.insert(tk.END, f"\n{error_msg}\n"))
+    
+    def update_realtime_results(self, predictions):
+        """Actualizar resultados en tiempo real en la UI"""
+        # Limpiar resultados anteriores pero mantener encabezado
+        self.results_text.delete(1.0, tk.END)
+        
+        # Encabezado
+        self.results_text.insert(tk.END, "=" * 70 + "\n")
+        self.results_text.insert(tk.END, "ANÁLISIS EN TIEMPO REAL - WEBCAM\n")
+        self.results_text.insert(tk.END, "=" * 70 + "\n\n")
+        
+        # Información de estado
+        self.results_text.insert(tk.END, f"Frames capturados: {self.frame_count}\n")
+        self.results_text.insert(tk.END, f"Buffer: {len(self.frame_buffer)}/{self.buffer_size} frames\n")
+        self.results_text.insert(tk.END, "-" * 70 + "\n\n")
+        
+        # Resultados de cada modelo
+        self.results_text.insert(tk.END, "PREDICCIONES ACTUALES:\n")
+        self.results_text.insert(tk.END, "-" * 70 + "\n")
+        
+        model_results = []
+        for model_name, pred_data in predictions.items():
+            if 'error' in pred_data:
+                error_short = pred_data['error'].split('\n')[0][:50]
+                model_results.append(f"{model_name:15s}: ERROR - {error_short}...")
+                continue
+            
+            if pred_data['most_common']:
+                activity, count = pred_data['most_common']
+                percentage = (count / pred_data['total_frames']) * 100
+                model_results.append(f"{model_name:15s}: {activity:20s} ({percentage:5.1f}%)")
+        
+        # Ordenar resultados para mostrar XGBoost primero (generalmente más preciso)
+        priority_order = ['XGBoost', 'RandomForest', 'SVM']
+        sorted_results = []
+        for priority in priority_order:
+            for result in model_results:
+                if result.startswith(priority):
+                    sorted_results.append(result)
+                    model_results.remove(result)
+                    break
+        sorted_results.extend(model_results)  # Agregar los restantes
+        
+        for result in sorted_results:
+            self.results_text.insert(tk.END, result + "\n")
+        
+        # Distribución completa (si hay múltiples actividades detectadas)
+        self.results_text.insert(tk.END, "\n" + "-" * 70 + "\n")
+        self.results_text.insert(tk.END, "DISTRIBUCIÓN DETALLADA:\n")
+        self.results_text.insert(tk.END, "-" * 70 + "\n")
+        
+        # Mostrar distribución del mejor modelo (XGBoost si está disponible)
+        best_model = None
+        for model_name in ['XGBoost', 'RandomForest', 'SVM']:
+            if model_name in predictions and 'frequencies' in predictions[model_name]:
+                best_model = predictions[model_name]
+                break
+        
+        if best_model and 'frequencies' in best_model:
+            sorted_freq = sorted(best_model['frequencies'].items(), key=lambda x: x[1], reverse=True)
+            for activity, count in sorted_freq:
+                percentage = (count / best_model['total_frames']) * 100
+                bar_length = int(percentage / 2)  # Barra visual
+                bar = "█" * bar_length
+                self.results_text.insert(tk.END, f"  {activity:20s}: {percentage:5.1f}% {bar}\n")
+        
+        # Timestamp
+        self.results_text.insert(tk.END, "\n" + "=" * 70 + "\n")
+        self.results_text.insert(tk.END, f"Última actualización: {pd.Timestamp.now().strftime('%H:%M:%S')}\n")
+        self.results_text.insert(tk.END, "=" * 70 + "\n")
+        
+        # Scroll al final
+        self.results_text.see(tk.END)
+    
+    def on_closing(self):
+        """Manejar cierre de la aplicación"""
+        if self.webcam_active:
+            self.stop_webcam()
+        self.root.destroy()
 
 def main():
     root = tk.Tk()
